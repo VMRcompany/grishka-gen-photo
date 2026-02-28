@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Гришка AI — Фотогенератор</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc;
+            color: #0f172a;
+            margin: 0;
+            padding: 0;
+            overflow-x: hidden;
+        }
+        ::selection {
+            background-color: #000000;
+            color: #ffffff;
+        }
+        .animate-in {
+            animation-duration: 0.5s;
+            animation-fill-mode: both;
+        }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .fade-in { animation-name: fadeIn; }
+        .slide-up { animation-name: slideUp; }
+        
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@19.0.0",
+        "react-dom": "https://esm.sh/react-dom@19.0.0",
+        "react-dom/client": "https://esm.sh/react-dom@19.0.0/client",
+        "@google/genai": "https://esm.sh/@google/genai@1.41.0",
+        "lucide-react": "https://esm.sh/lucide-react@0.474.0",
+        "htm": "https://esm.sh/htm@3.1.1"
+      }
+    }
+    </script>
+
+    <script type="module">
+        import React, { useState, useCallback, useRef } from 'react';
+        import ReactDOM from 'react-dom/client';
+        import { GoogleGenAI } from "@google/genai";
+        import * as Lucide from 'lucide-react';
+        import htm from 'htm';
+
+        const html = htm.bind(React.createElement);
+
+        // Оптимизированная функция повторных попыток для ускорения работы
+        const withRetry = async (fn, maxRetries = 2) => {
+          let lastError;
+          for (let i = 0; i < maxRetries; i++) {
+            try {
+              return await fn();
+            } catch (err) {
+              lastError = err;
+              const msg = err.message?.toLowerCase() || '';
+              // Если ошибка квоты, ждем чуть меньше для скорости
+              if (msg.includes('429') || msg.includes('limit') || msg.includes('quota')) {
+                const waitTime = Math.pow(2, i) * 1000 + (Math.random() * 500);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                continue;
+              }
+              throw err;
+            }
+          }
+          throw lastError;
+        };
+
+        const LoadingSpinner = () => html`
+          <div className="flex flex-col items-center justify-center space-y-6 py-12 animate-in fade-in">
+            <div className="relative w-12 h-12">
+              <div className="absolute top-0 left-0 w-full h-full border-4 border-slate-100 rounded-full"></div>
+              <div className="absolute top-0 left-0 w-full h-full border-4 border-black rounded-full border-t-transparent animate-spin"></div>
+            </div>
+            <p className="text-slate-400 font-medium tracking-widest text-[10px] uppercase animate-pulse">
+              Гришка колдует...
+            </p>
+          </div>
+        `;
+
+        const App = () => {
+          const [prompt, setPrompt] = useState('');
+          const [status, setStatus] = useState('IDLE');
+          const [result, setResult] = useState(null);
+          const [error, setError] = useState(null);
+          const [attachedImage, setAttachedImage] = useState(null);
+          const [showAttachMenu, setShowAttachMenu] = useState(false);
+          const [history, setHistory] = useState(() => {
+            try {
+              return JSON.parse(localStorage.getItem('grishka_history') || '[]');
+            } catch (e) {
+              return [];
+            }
+          });
+          const fileInputRef = useRef(null);
+
+          const handleGenerate = useCallback(async () => {
+            if (!prompt.trim() && !attachedImage) return;
+
+            setStatus('LOADING');
+            setError(null);
+            setShowAttachMenu(false);
+
+            try {
+              /**
+               * ============================================================
+               * ВСТАВЬТЕ ВАШ API КЛЮЧ НИЖЕ (МЕЖДУ ОДИНАРНЫМИ КАВЫЧКАМИ)
+               * INSERT YOUR API KEY BELOW (INSIDE THE SINGLE QUOTES)
+               * ============================================================
+               */
+              const API_KEY_INSERT = 'AIzaSyDvZAYpV2mCE3fy1Ni4qi5UBZv0ht71bsI'; 
+
+              // Проверка ключа (для Google Sites это критично)
+              const finalKey = API_KEY_INSERT !== 'AIzaSyDvZAYpV2mCE3fy1Ni4qi5UBZv0ht71bsI' 
+                ? API_KEY_INSERT 
+                : (typeof process !== 'undefined' ? (process.env.API_KEY || process.env.GEMINI_API_KEY) : '');
+
+              if (!finalKey) {
+                console.error("API Key is missing!");
+                throw new Error("KEY_MISSING");
+              }
+
+              const ai = new GoogleGenAI({ apiKey: finalKey });
+              const finalPrompt = prompt.trim() || "Шедевр цифрового искусства";
+              
+              const parts = [];
+              if (attachedImage) {
+                const base64Data = attachedImage.split(',')[1];
+                const mimeType = attachedImage.split(';')[0].split(':')[1];
+                parts.push({ inlineData: { data: base64Data, mimeType } });
+              }
+              parts.push({ text: finalPrompt });
+
+              // Используем gemini-2.5-flash-image для максимальной скорости
+              const response = await withRetry(() => 
+                ai.models.generateContent({
+                  model: 'gemini-2.5-flash-image',
+                  contents: { parts },
+                  config: { 
+                    imageConfig: { aspectRatio: "1:1" }
+                  },
+                })
+              );
+
+              let imageUrl = '';
+              const candidate = response.candidates?.[0];
+              if (candidate && candidate.content && candidate.content.parts) {
+                for (const part of candidate.content.parts) {
+                  if (part.inlineData) {
+                    imageUrl = `data:image/png;base64,${part.inlineData.data}`;
+                    break;
+                  }
+                }
+              }
+
+              if (!imageUrl) throw new Error("EMPTY_RESPONSE");
+
+              const newResult = { url: imageUrl, prompt: finalPrompt };
+              setResult(newResult);
+              setStatus('SUCCESS');
+
+              // Сохранение в историю
+              const newHistory = [newResult, ...history].slice(0, 12);
+              setHistory(newHistory);
+              localStorage.setItem('grishka_history', JSON.stringify(newHistory));
+            } catch (err) {
+              console.error("Grishka AI Error Log:", err);
+              setError("На пути возникло препятствие. Включите VPN для безопасности.");
+              setStatus('ERROR');
+            }
+          }, [prompt, attachedImage, history]);
+
+          const handleFileChange = (e) => {
+            const file = e.target.files?.[0];
+            if (file) {
+              const reader = new FileReader();
+              reader.onloadend = () => {
+                setAttachedImage(reader.result);
+                setShowAttachMenu(false);
+              };
+              reader.readAsDataURL(file);
+            }
+          };
+
+          const handleDownload = (item = result) => {
+            if (!item) return;
+            const link = document.createElement('a');
+            link.href = item.url;
+            link.download = `grishka-${Date.now()}.png`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+          };
+
+          const clearHistory = () => {
+            if (confirm('Очистить всю историю генераций?')) {
+              setHistory([]);
+              localStorage.removeItem('grishka_history');
+            }
+          };
+
+          const resetApp = () => {
+            setPrompt('');
+            setResult(null);
+            setAttachedImage(null);
+            setStatus('IDLE');
+            setError(null);
+          };
+
+          return html`
+            <div className="min-h-screen bg-slate-50 text-slate-900 py-10 px-4 md:px-6">
+              <div className="max-w-2xl mx-auto">
+                <header className="text-center mb-8 animate-in fade-in">
+                  <h1 className="text-2xl md:text-4xl font-extrabold mb-3 tracking-tight leading-tight text-black">
+                    Сгенерируй фото <span className="italic font-medium tracking-normal text-black">вместе с Гришкой AI</span>
+                  </h1>
+                </header>
+
+                <div className="relative mb-10">
+                  <div className="bg-white p-1.5 rounded-3xl shadow-xl border border-slate-100 flex items-center transition-all focus-within:ring-2 focus-within:ring-black/5">
+                    <button 
+                      onClick=${() => setShowAttachMenu(!showAttachMenu)}
+                      className="p-3 text-slate-400 hover:text-black transition-colors rounded-2xl hover:bg-slate-50"
+                      title="Прикрепить фото"
+                    >
+                      <${Lucide.Paperclip} size=${20} />
+                    </button>
+                    
+                    <input
+                      type="text"
+                      placeholder="${attachedImage ? "Что изменить на фото?" : "Опиши фото мечты..."}"
+                      value=${prompt}
+                      onChange=${(e) => setPrompt(e.target.value)}
+                      onKeyDown=${(e) => e.key === 'Enter' && handleGenerate()}
+                      disabled=${status === 'LOADING'}
+                      className="w-full bg-transparent border-none focus:ring-0 px-2 py-3 text-base md:text-lg placeholder:text-slate-300 font-medium text-slate-900 outline-none"
+                    />
+                    
+                    <input type="file" ref=${fileInputRef} onChange=${handleFileChange} accept="image/*" className="hidden" />
+
+                    <button
+                      onClick=${handleGenerate}
+                      disabled=${status === 'LOADING' || (!prompt.trim() && !attachedImage)}
+                      className="bg-black text-white p-3.5 rounded-2xl hover:opacity-80 transition-all disabled:opacity-50 shadow-lg active:scale-95"
+                    >
+                      ${status === 'LOADING' ? 
+                        html`<${Lucide.RefreshCw} size=${20} className="animate-spin" />` : 
+                        html`<${Lucide.ArrowRight} size=${20} />`
+                      }
+                    </button>
+                  </div>
+
+                  ${showAttachMenu && html`
+                    <div className="absolute top-full left-0 mt-2 bg-white border border-slate-100 rounded-2xl p-2 shadow-2xl w-48 animate-in slide-up z-50">
+                      <button 
+                        onClick=${() => fileInputRef.current.click()}
+                        className="flex items-center space-x-3 w-full p-2.5 hover:bg-slate-50 rounded-xl transition-colors text-sm font-semibold"
+                      >
+                        <div className="bg-slate-100 p-1.5 rounded-lg"><${Lucide.Image} size=${16} /></div>
+                        <span>Загрузить фото</span>
+                      </button>
+                    </div>
+                  `}
+
+                  ${attachedImage && html`
+                    <div className="mt-3 flex items-center space-x-2 animate-in fade-in">
+                      <div className="relative">
+                        <img src="${attachedImage}" className="w-12 h-12 object-cover rounded-xl border-2 border-white shadow-md" />
+                        <button 
+                          onClick=${() => setAttachedImage(null)}
+                          className="absolute -top-1.5 -right-1.5 bg-black text-white p-0.5 rounded-full shadow-md hover:bg-red-600 transition-colors"
+                        >
+                          <${Lucide.X} size=${10} />
+                        </button>
+                      </div>
+                      <span className="text-[9px] font-bold text-slate-300 uppercase tracking-widest">Источник</span>
+                    </div>
+                  `}
+                </div>
+
+                <div className="min-h-[350px]">
+                  ${status === 'LOADING' && html`<${LoadingSpinner} />`}
+
+                  ${status === 'SUCCESS' && result && html`
+                    <div className="animate-in slide-up space-y-6">
+                      <div className="relative group bg-white p-2 rounded-[2.5rem] shadow-2xl border border-slate-100 overflow-hidden">
+                        <img src="${result.url}" className="w-full h-auto aspect-square object-cover rounded-[2rem]" />
+                        <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center justify-center backdrop-blur-sm">
+                          <button 
+                            onClick=${() => handleDownload()} 
+                            className="bg-white text-black p-4 rounded-2xl shadow-2xl hover:scale-105 transition-transform font-bold flex items-center space-x-2 text-sm"
+                          >
+                            <${Lucide.Download} size=${18} />
+                            <span>Сохранить</span>
+                          </button>
+                        </div>
+                      </div>
+                      <div className="text-center">
+                        <button 
+                          onClick=${resetApp} 
+                          className="text-slate-300 hover:text-black transition-colors font-bold text-[9px] uppercase tracking-[0.3em]"
+                        >
+                          Начать заново
+                        </button>
+                      </div>
+                    </div>
+                  `}
+
+                  ${status === 'ERROR' && html`
+                    <div className="flex flex-col items-center justify-center space-y-4 py-16 animate-in slide-up text-center">
+                      <div className="bg-red-50 p-4 rounded-full text-red-400 shadow-inner">
+                        <${Lucide.AlertCircle} size=${32} />
+                      </div>
+                      <p className="text-red-500 font-semibold text-xs max-w-[260px] leading-relaxed">${error}</p>
+                      <button onClick=${handleGenerate} className="bg-black text-white px-6 py-2.5 rounded-xl text-xs font-bold shadow-lg hover:scale-105 transition-transform">Повторить</button>
+                    </div>
+                  `}
+
+                  ${status === 'IDLE' && !result && html`
+                    <div className="grid grid-cols-2 gap-4 opacity-[0.03] select-none">
+                      <div className="aspect-square bg-black rounded-3xl"></div>
+                      <div className="aspect-square bg-black rounded-3xl"></div>
+                    </div>
+                  `}
+                </div>
+
+                ${history.length > 0 && html`
+                  <div className="mt-16 animate-in fade-in">
+                    <div className="flex items-center justify-between mb-6">
+                      <h2 className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.3em]">История генераций</h2>
+                      <button 
+                        onClick=${clearHistory}
+                        className="text-[9px] font-bold text-slate-300 hover:text-red-500 transition-colors uppercase tracking-widest"
+                      >
+                        Очистить
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-3 md:grid-cols-4 gap-3">
+                      ${history.map((item, idx) => html`
+                        <div 
+                          key=${idx}
+                          onClick=${() => { setResult(item); setStatus('SUCCESS'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+                          className="relative aspect-square rounded-2xl overflow-hidden cursor-pointer group border border-slate-100 hover:border-black transition-all"
+                        >
+                          <img src="${item.url}" className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" />
+                          <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                            <${Lucide.Eye} size=${16} className="text-white" />
+                          </div>
+                        </div>
+                      `)}
+                    </div>
+                  </div>
+                `}
+              </div>
+
+              <footer className="mt-16 py-8 border-t border-slate-100 text-center">
+                <p className="text-slate-300 text-[9px] font-bold uppercase tracking-[0.3em]">© 2024 Grishka AI</p>
+              </footer>
+            </div>
+          `;
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(React.createElement(App));
+    </script>
+</body>
+</html>
